@@ -1,1 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+
+# Environment variables / secrets
+.env
+
+# IDE / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Videos / large data (keep repo light)
+*.mp4
+*.mov
+*.avi
+*.mkv
+data/*
+!data/README.md
 
