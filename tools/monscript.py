@@ -89,8 +89,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def can_use_opencv_gui() -> bool:
+    """Return True when OpenCV highgui can create windows on this host."""
+    try:
+        cv2.namedWindow("__camera_arriere_probe__", cv2.WINDOW_NORMAL)
+        cv2.destroyWindow("__camera_arriere_probe__")
+    except cv2.error:
+        return False
+    return True
+
+
 def main() -> None:
     args = parse_args()
+    auto_headless = False
+    if not args.headless and not can_use_opencv_gui():
+        auto_headless = True
+        args.headless = True
+
     steering_deg = 0
 
     screenshot_dir = Path("data/screenshots")
@@ -125,6 +140,10 @@ def main() -> None:
             frame_bgr = draw_overlay(frame_bgr, steering_deg, fps)
 
             if args.headless:
+                if auto_headless and total_frames == 1:
+                    print(
+                        "OpenCV GUI indisponible (GTK/X11). Bascule automatique en mode --headless."
+                    )
                 if total_frames % 10 == 0:
                     file_path = screenshot_dir / f"headless_{int(time.time())}.jpg"
                     cv2.imwrite(str(file_path), frame_bgr)
