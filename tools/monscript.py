@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -73,8 +74,14 @@ def draw_overlay(frame_bgr: np.ndarray, steering_deg: int, fps: float) -> np.nda
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rear-camera preview with simple AR overlay")
-    parser.add_argument("--width", type=int, default=1280, help="Preview width")
-    parser.add_argument("--height", type=int, default=720, help="Preview height")
+    parser.add_argument("--width", type=int, default=None, help="Preview width")
+    parser.add_argument("--height", type=int, default=None, help="Preview height")
+    parser.add_argument(
+        "--display-scale",
+        type=float,
+        default=0.5,
+        help="Scale factor applied before cv2.imshow (e.g. 0.5 halves display size)",
+    )
     parser.add_argument(
         "--headless",
         action="store_true",
@@ -101,6 +108,30 @@ def can_use_opencv_gui() -> bool:
 
 def main() -> None:
     args = parse_args()
+    ssh_detected = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"))
+    display_env = os.environ.get("DISPLAY", "")
+    x11_forwarded = ssh_detected and "localhost:" in display_env
+
+    width_explicit = "--width" in sys.argv
+    height_explicit = "--height" in sys.argv
+
+    if args.width is None:
+        args.width = 640 if x11_forwarded else 1280
+    if args.height is None:
+        args.height = 360 if x11_forwarded else 720
+
+    if not width_explicit and not height_explicit and x11_forwarded:
+        # Ensure both dimensions are aligned to a lightweight X11 forwarding profile.
+        args.width, args.height = 640, 360
+
+    print(
+        "[startup] "
+        f"DISPLAY={display_env or '<unset>'} "
+        f"width={args.width} height={args.height} "
+        f"display_scale={args.display_scale:.2f} "
+        f"ssh_detected={ssh_detected} x11_forwarded={x11_forwarded}"
+    )
+
     auto_headless = False
     if not args.headless and not can_use_opencv_gui():
         auto_headless = True
@@ -123,9 +154,14 @@ def main() -> None:
     fps = 0.0
     fps_window_start = time.perf_counter()
 
+    if not args.headless:
+        cv2.namedWindow("Camera arriere - Phase 1", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Camera arriere - Phase 1", 800, 450)
+        cv2.moveWindow("Camera arriere - Phase 1", 50, 50)
+
     try:
         while True:
-            rgb_frame = picam2.capture_array()
+            rgb_frame = picam2.capture_array("main")
             frame_bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
 
             frame_count += 1
@@ -152,7 +188,15 @@ def main() -> None:
                     break
                 continue
 
-            cv2.imshow("Camera arriere - Phase 1", frame_bgr)
+            display_frame = frame_bgr
+            if args.display_scale != 1.0:
+                scaled_w = max(1, int(frame_bgr.shape[1] * args.display_scale))
+                scaled_h = max(1, int(frame_bgr.shape[0] * args.display_scale))
+                display_frame = cv2.resize(
+                    frame_bgr, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA
+                )
+
+            cv2.imshow("Camera arriere - Phase 1", display_frame)
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord("q"):
