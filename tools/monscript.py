@@ -101,6 +101,15 @@ def parse_args() -> argparse.Namespace:
         help="Number of frames to process in headless mode before exiting",
     )
     parser.add_argument(
+        "--pixel-format",
+        type=str,
+        default="YUV420",
+        help=(
+            "Main stream pixel format to request from Picamera2 "
+            "(default: YUV420, same family as rpicam-hello preview path)."
+        ),
+    )
+    parser.add_argument(
         "--dump-first-frame",
         action="store_true",
         help="Save raw.npy and bgr.png for the first captured frame before overlay",
@@ -122,55 +131,55 @@ def configure_camera(
     picam2: Picamera2,
     width: int,
     height: int,
-) -> tuple[str, bool, tuple[int, int]]:
-    """Configure camera preview stream and infer whether RGB->BGR conversion is needed.
-
-    Returns (effective_format, needs_rgb_to_bgr_conversion, effective_main_size).
-    """
+    pixel_format: str,
+) -> tuple[str, tuple[int, int]]:
+    """Configure camera preview stream and return the negotiated main format and size."""
     requested_size = (width, height)
+    requested_format = pixel_format.strip().upper()
 
-    rgb_config = picam2.create_preview_configuration(
-        main={"size": requested_size, "format": "RGB888"}
+    config = picam2.create_preview_configuration(
+        main={"size": requested_size, "format": requested_format}
     )
-    picam2.configure(rgb_config)
+    picam2.configure(config)
 
     configured_main = picam2.camera_configuration().get("main", {})
-    effective_format = str(configured_main.get("format", "RGB888")).upper()
+    effective_format = str(configured_main.get("format", requested_format)).upper()
     effective_size = tuple(configured_main.get("size", requested_size))
 
-    rgb_like_formats = {"RGB888", "RGBX8888", "RGBA8888", "XBGR8888"}
-    bgr_like_formats = {"BGR888", "BGRX8888", "BGRA8888", "XRGB8888"}
-
-    if effective_format in rgb_like_formats:
-        needs_rgb_to_bgr = True
-    elif effective_format in bgr_like_formats:
-        needs_rgb_to_bgr = False
-    else:
-        # Keep previous behavior for unknown 3-channel formats.
-        needs_rgb_to_bgr = True
-
-    return effective_format, needs_rgb_to_bgr, effective_size
+    return effective_format, effective_size
 
 
-def to_bgr(frame: np.ndarray, needs_rgb_to_bgr: bool) -> np.ndarray:
-    """Convert camera frame into BGR safely across 1/3/4-channel formats."""
+def to_bgr(frame: np.ndarray, effective_format: str) -> tuple[np.ndarray, str]:
+    """Convert camera frame to BGR using the negotiated stream format."""
+    fmt = effective_format.upper()
+
+    if fmt in {"YUV420", "YUV420P", "YUV420_8"}:
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420), "YUV420->BGR"
+    if fmt in {"YVU420", "YV12"}:
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_YV12), "YVU420->BGR"
+
     if frame.ndim == 2:
-        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR), "GRAY->BGR"
 
     if frame.ndim != 3:
-        raise ValueError(f"Unsupported frame shape: {frame.shape}")
+        raise ValueError(f"Unsupported frame shape: {frame.shape} for format {fmt}")
 
     channels = frame.shape[2]
     if channels == 3:
-        if needs_rgb_to_bgr:
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        return frame.copy()
-    if channels == 4:
-        if needs_rgb_to_bgr:
-            return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        if fmt in {"RGB888", "RGB24"}:
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), "RGB->BGR"
+        if fmt in {"BGR888", "BGR24"}:
+            return frame.copy(), "none"
+        return frame.copy(), "fallback-none"
 
-    raise ValueError(f"Unsupported channel count: {channels}")
+    if channels == 4:
+        if fmt in {"RGBA8888", "RGBX8888", "XBGR8888"}:
+            return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR), "RGBA->BGR"
+        if fmt in {"BGRA8888", "BGRX8888", "XRGB8888"}:
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR), "BGRA->BGR"
+        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR), "fallback-BGRA->BGR"
+
+    raise ValueError(f"Unsupported channel count: {channels} (format={fmt})")
 
 
 def main() -> None:
@@ -202,13 +211,13 @@ def main() -> None:
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 
     picam2 = Picamera2()
-    effective_format, needs_rgb_to_bgr, effective_size = configure_camera(
-        picam2, args.width, args.height
+    effective_format, effective_size = configure_camera(
+        picam2, args.width, args.height, args.pixel_format
     )
 
     stream_config = picam2.camera_configuration().get("main", {})
     stream_size = stream_config.get("size", effective_size)
-    stream_format = stream_config.get("format", effective_format)
+    stream_format = str(stream_config.get("format", effective_format)).upper()
 
     print(
         "[startup] "
@@ -216,7 +225,6 @@ def main() -> None:
         f"resolution={args.width}x{args.height} "
         f"stream_main_size={stream_size[0]}x{stream_size[1]} "
         f"stream_main_format={stream_format} "
-        f"conversion_mode={'RGB->BGR' if needs_rgb_to_bgr else 'none'} "
         f"display_scale={args.display_scale:.2f} "
         f"overlay={'off' if args.no_overlay else 'on'} "
         f"ssh_detected={ssh_detected} x11_forwarded={x11_forwarded}"
@@ -231,21 +239,27 @@ def main() -> None:
     fps_window_start = time.perf_counter()
     first_frame_logged = False
     first_frame_dumped = False
+    conversion_mode_logged = False
 
+    window_created = False
     if not args.headless:
         cv2.namedWindow("Camera arriere - Phase 1", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Camera arriere - Phase 1", 800, 450)
         cv2.moveWindow("Camera arriere - Phase 1", 50, 50)
+        window_created = True
 
     try:
         warmup_remaining = WARMUP_SKIP_FRAMES
         while True:
             raw_frame = picam2.capture_array("main")
-            frame_bgr = to_bgr(raw_frame, needs_rgb_to_bgr)
+            frame_bgr, conversion_mode = to_bgr(raw_frame, stream_format)
 
             if not first_frame_logged:
                 print(f"[startup] first_frame_shape={raw_frame.shape} dtype={raw_frame.dtype}")
                 first_frame_logged = True
+            if not conversion_mode_logged:
+                print(f"[startup] conversion_mode={conversion_mode}")
+                conversion_mode_logged = True
 
             if args.dump_first_frame and not first_frame_dumped:
                 raw_dump_path = screenshot_dir / "raw.npy"
@@ -311,7 +325,8 @@ def main() -> None:
         print("\n[shutdown] KeyboardInterrupt reçu, arrêt propre.")
     finally:
         picam2.stop()
-        cv2.destroyAllWindows()
+        if window_created:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
