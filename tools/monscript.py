@@ -100,6 +100,11 @@ def parse_args() -> argparse.Namespace:
         default=30,
         help="Number of frames to process in headless mode before exiting",
     )
+    parser.add_argument(
+        "--dump-first-frame",
+        action="store_true",
+        help="Save raw.png and bgr.png for the first captured frame before overlay",
+    )
     return parser.parse_args()
 
 
@@ -117,10 +122,10 @@ def configure_camera(
     picam2: Picamera2,
     width: int,
     height: int,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, tuple[int, int]]:
     """Configure camera preview stream, preferring BGR888 when available.
 
-    Returns (effective_format, needs_rgb_to_bgr_conversion).
+    Returns (effective_format, needs_rgb_to_bgr_conversion, effective_main_size).
     """
     requested_size = (width, height)
 
@@ -130,7 +135,8 @@ def configure_camera(
         )
         if bgr_config["main"].get("format") == "BGR888":
             picam2.configure(bgr_config)
-            return "BGR888", False
+            main_cfg = bgr_config["main"]
+            return "BGR888", False, tuple(main_cfg.get("size", requested_size))
     except Exception:
         # Fallback below keeps startup robust on older camera stacks.
         pass
@@ -139,7 +145,29 @@ def configure_camera(
         main={"size": requested_size, "format": "RGB888"}
     )
     picam2.configure(rgb_config)
-    return "RGB888 (fallback)", True
+    main_cfg = rgb_config["main"]
+    return "RGB888 (fallback)", True, tuple(main_cfg.get("size", requested_size))
+
+
+def to_bgr(frame: np.ndarray, needs_rgb_to_bgr: bool) -> np.ndarray:
+    """Convert camera frame into BGR safely across 1/3/4-channel formats."""
+    if frame.ndim == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+    if frame.ndim != 3:
+        raise ValueError(f"Unsupported frame shape: {frame.shape}")
+
+    channels = frame.shape[2]
+    if channels == 3:
+        if needs_rgb_to_bgr:
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        return frame
+    if channels == 4:
+        if needs_rgb_to_bgr:
+            return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+    raise ValueError(f"Unsupported channel count: {channels}")
 
 
 def main() -> None:
@@ -171,13 +199,21 @@ def main() -> None:
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 
     picam2 = Picamera2()
-    effective_format, needs_rgb_to_bgr = configure_camera(picam2, args.width, args.height)
+    effective_format, needs_rgb_to_bgr, effective_size = configure_camera(
+        picam2, args.width, args.height
+    )
+
+    stream_config = picam2.camera_configuration().get("main", {})
+    stream_size = stream_config.get("size", effective_size)
+    stream_format = stream_config.get("format", effective_format)
 
     print(
         "[startup] "
         f"DISPLAY={display_env or '<unset>'} "
         f"resolution={args.width}x{args.height} "
-        f"stream_format={effective_format} "
+        f"stream_main_size={stream_size[0]}x{stream_size[1]} "
+        f"stream_main_format={stream_format} "
+        f"conversion_mode={'RGB->BGR' if needs_rgb_to_bgr else 'none'} "
         f"display_scale={args.display_scale:.2f} "
         f"overlay={'off' if args.no_overlay else 'on'} "
         f"ssh_detected={ssh_detected} x11_forwarded={x11_forwarded}"
@@ -190,6 +226,8 @@ def main() -> None:
     total_frames = 0
     fps = 0.0
     fps_window_start = time.perf_counter()
+    first_frame_logged = False
+    first_frame_dumped = False
 
     if not args.headless:
         cv2.namedWindow("Camera arriere - Phase 1", cv2.WINDOW_NORMAL)
@@ -200,11 +238,19 @@ def main() -> None:
         warmup_remaining = WARMUP_SKIP_FRAMES
         while True:
             raw_frame = picam2.capture_array("main")
-            frame_bgr = (
-                cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR)
-                if needs_rgb_to_bgr
-                else raw_frame
-            )
+            frame_bgr = to_bgr(raw_frame, needs_rgb_to_bgr)
+
+            if not first_frame_logged:
+                print(f"[startup] first_frame_shape={raw_frame.shape} dtype={raw_frame.dtype}")
+                first_frame_logged = True
+
+            if args.dump_first_frame and not first_frame_dumped:
+                raw_dump_path = screenshot_dir / "raw.png"
+                bgr_dump_path = screenshot_dir / "bgr.png"
+                cv2.imwrite(str(raw_dump_path), raw_frame)
+                cv2.imwrite(str(bgr_dump_path), frame_bgr)
+                print(f"dumped first frame: {raw_dump_path} and {bgr_dump_path}")
+                first_frame_dumped = True
 
             if warmup_remaining > 0:
                 warmup_remaining -= 1
