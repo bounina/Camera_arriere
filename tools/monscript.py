@@ -21,6 +21,8 @@ from src.overlay import generate_curve_points
 
 MAX_STEERING_DEG = 35
 STEERING_STEP_DEG = 2
+WARMUP_SECONDS = 1.0
+WARMUP_SKIP_FRAMES = 10
 
 
 def draw_overlay(frame_bgr: np.ndarray, steering_deg: int, fps: float) -> np.ndarray:
@@ -83,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         help="Scale factor applied before cv2.imshow (e.g. 0.5 halves display size)",
     )
     parser.add_argument(
+        "--no-overlay",
+        action="store_true",
+        help="Display raw frames without parking overlay/HUD",
+    )
+    parser.add_argument(
         "--headless",
         action="store_true",
         help="Run without display and save a few processed frames to data/screenshots/",
@@ -106,6 +113,35 @@ def can_use_opencv_gui() -> bool:
     return True
 
 
+def configure_camera(
+    picam2: Picamera2,
+    width: int,
+    height: int,
+) -> tuple[str, bool]:
+    """Configure camera preview stream, preferring BGR888 when available.
+
+    Returns (effective_format, needs_rgb_to_bgr_conversion).
+    """
+    requested_size = (width, height)
+
+    try:
+        bgr_config = picam2.create_preview_configuration(
+            main={"size": requested_size, "format": "BGR888"}
+        )
+        if bgr_config["main"].get("format") == "BGR888":
+            picam2.configure(bgr_config)
+            return "BGR888", False
+    except Exception:
+        # Fallback below keeps startup robust on older camera stacks.
+        pass
+
+    rgb_config = picam2.create_preview_configuration(
+        main={"size": requested_size, "format": "RGB888"}
+    )
+    picam2.configure(rgb_config)
+    return "RGB888 (fallback)", True
+
+
 def main() -> None:
     args = parse_args()
     ssh_detected = bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"))
@@ -124,14 +160,6 @@ def main() -> None:
         # Ensure both dimensions are aligned to a lightweight X11 forwarding profile.
         args.width, args.height = 640, 360
 
-    print(
-        "[startup] "
-        f"DISPLAY={display_env or '<unset>'} "
-        f"width={args.width} height={args.height} "
-        f"display_scale={args.display_scale:.2f} "
-        f"ssh_detected={ssh_detected} x11_forwarded={x11_forwarded}"
-    )
-
     auto_headless = False
     if not args.headless and not can_use_opencv_gui():
         auto_headless = True
@@ -143,11 +171,20 @@ def main() -> None:
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 
     picam2 = Picamera2()
-    config = picam2.create_preview_configuration(
-        main={"size": (args.width, args.height), "format": "RGB888"}
+    effective_format, needs_rgb_to_bgr = configure_camera(picam2, args.width, args.height)
+
+    print(
+        "[startup] "
+        f"DISPLAY={display_env or '<unset>'} "
+        f"resolution={args.width}x{args.height} "
+        f"stream_format={effective_format} "
+        f"display_scale={args.display_scale:.2f} "
+        f"overlay={'off' if args.no_overlay else 'on'} "
+        f"ssh_detected={ssh_detected} x11_forwarded={x11_forwarded}"
     )
-    picam2.configure(config)
+
     picam2.start()
+    time.sleep(WARMUP_SECONDS)
 
     frame_count = 0
     total_frames = 0
@@ -160,9 +197,18 @@ def main() -> None:
         cv2.moveWindow("Camera arriere - Phase 1", 50, 50)
 
     try:
+        warmup_remaining = WARMUP_SKIP_FRAMES
         while True:
-            rgb_frame = picam2.capture_array("main")
-            frame_bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+            raw_frame = picam2.capture_array("main")
+            frame_bgr = (
+                cv2.cvtColor(raw_frame, cv2.COLOR_RGB2BGR)
+                if needs_rgb_to_bgr
+                else raw_frame
+            )
+
+            if warmup_remaining > 0:
+                warmup_remaining -= 1
+                continue
 
             frame_count += 1
             total_frames += 1
@@ -173,7 +219,8 @@ def main() -> None:
                 frame_count = 0
                 fps_window_start = now
 
-            frame_bgr = draw_overlay(frame_bgr, steering_deg, fps)
+            if not args.no_overlay:
+                frame_bgr = draw_overlay(frame_bgr, steering_deg, fps)
 
             if args.headless:
                 if auto_headless and total_frames == 1:
@@ -211,6 +258,8 @@ def main() -> None:
                 filename = screenshot_dir / f"capture_{int(time.time())}.jpg"
                 cv2.imwrite(str(filename), frame_bgr)
                 print(f"capture saved: {filename}")
+    except KeyboardInterrupt:
+        print("\n[shutdown] KeyboardInterrupt reçu, arrêt propre.")
     finally:
         picam2.stop()
         cv2.destroyAllWindows()
