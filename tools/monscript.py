@@ -123,7 +123,7 @@ def configure_camera(
     width: int,
     height: int,
 ) -> tuple[str, bool, tuple[int, int]]:
-    """Configure camera preview stream deterministically in RGB888.
+    """Configure camera preview stream and infer whether RGB->BGR conversion is needed.
 
     Returns (effective_format, needs_rgb_to_bgr_conversion, effective_main_size).
     """
@@ -133,8 +133,23 @@ def configure_camera(
         main={"size": requested_size, "format": "RGB888"}
     )
     picam2.configure(rgb_config)
-    main_cfg = rgb_config["main"]
-    return "RGB888", True, tuple(main_cfg.get("size", requested_size))
+
+    configured_main = picam2.camera_configuration().get("main", {})
+    effective_format = str(configured_main.get("format", "RGB888")).upper()
+    effective_size = tuple(configured_main.get("size", requested_size))
+
+    rgb_like_formats = {"RGB888", "RGBX8888", "RGBA8888", "XBGR8888"}
+    bgr_like_formats = {"BGR888", "BGRX8888", "BGRA8888", "XRGB8888"}
+
+    if effective_format in rgb_like_formats:
+        needs_rgb_to_bgr = True
+    elif effective_format in bgr_like_formats:
+        needs_rgb_to_bgr = False
+    else:
+        # Keep previous behavior for unknown 3-channel formats.
+        needs_rgb_to_bgr = True
+
+    return effective_format, needs_rgb_to_bgr, effective_size
 
 
 def to_bgr(frame: np.ndarray, needs_rgb_to_bgr: bool) -> np.ndarray:
@@ -147,7 +162,9 @@ def to_bgr(frame: np.ndarray, needs_rgb_to_bgr: bool) -> np.ndarray:
 
     channels = frame.shape[2]
     if channels == 3:
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        if needs_rgb_to_bgr:
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        return frame.copy()
     if channels == 4:
         if needs_rgb_to_bgr:
             return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
