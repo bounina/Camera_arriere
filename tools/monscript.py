@@ -103,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dump-first-frame",
         action="store_true",
-        help="Save raw.png and bgr.png for the first captured frame before overlay",
+        help="Save raw.npy and bgr.png for the first captured frame before overlay",
     )
     return parser.parse_args()
 
@@ -123,30 +123,18 @@ def configure_camera(
     width: int,
     height: int,
 ) -> tuple[str, bool, tuple[int, int]]:
-    """Configure camera preview stream, preferring BGR888 when available.
+    """Configure camera preview stream deterministically in RGB888.
 
     Returns (effective_format, needs_rgb_to_bgr_conversion, effective_main_size).
     """
     requested_size = (width, height)
-
-    try:
-        bgr_config = picam2.create_preview_configuration(
-            main={"size": requested_size, "format": "BGR888"}
-        )
-        if bgr_config["main"].get("format") == "BGR888":
-            picam2.configure(bgr_config)
-            main_cfg = bgr_config["main"]
-            return "BGR888", False, tuple(main_cfg.get("size", requested_size))
-    except Exception:
-        # Fallback below keeps startup robust on older camera stacks.
-        pass
 
     rgb_config = picam2.create_preview_configuration(
         main={"size": requested_size, "format": "RGB888"}
     )
     picam2.configure(rgb_config)
     main_cfg = rgb_config["main"]
-    return "RGB888 (fallback)", True, tuple(main_cfg.get("size", requested_size))
+    return "RGB888", True, tuple(main_cfg.get("size", requested_size))
 
 
 def to_bgr(frame: np.ndarray, needs_rgb_to_bgr: bool) -> np.ndarray:
@@ -159,9 +147,7 @@ def to_bgr(frame: np.ndarray, needs_rgb_to_bgr: bool) -> np.ndarray:
 
     channels = frame.shape[2]
     if channels == 3:
-        if needs_rgb_to_bgr:
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        return frame
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     if channels == 4:
         if needs_rgb_to_bgr:
             return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
@@ -245,9 +231,9 @@ def main() -> None:
                 first_frame_logged = True
 
             if args.dump_first_frame and not first_frame_dumped:
-                raw_dump_path = screenshot_dir / "raw.png"
+                raw_dump_path = screenshot_dir / "raw.npy"
                 bgr_dump_path = screenshot_dir / "bgr.png"
-                cv2.imwrite(str(raw_dump_path), raw_frame)
+                np.save(raw_dump_path, raw_frame)
                 cv2.imwrite(str(bgr_dump_path), frame_bgr)
                 print(f"dumped first frame: {raw_dump_path} and {bgr_dump_path}")
                 first_frame_dumped = True
