@@ -101,6 +101,15 @@ def parse_args() -> argparse.Namespace:
         help="Number of frames to process in headless mode before exiting",
     )
     parser.add_argument(
+        "--pixel-format",
+        type=str,
+        default="BGR888",
+        help=(
+            "Main stream pixel format to request from Picamera2 "
+            "(default: BGR888 to match OpenCV display expectations)."
+        ),
+    )
+    parser.add_argument(
         "--dump-first-frame",
         action="store_true",
         help="Save raw.npy and bgr.png for the first captured frame before overlay",
@@ -122,6 +131,7 @@ def configure_camera(
     picam2: Picamera2,
     width: int,
     height: int,
+    pixel_format: str,
 ) -> tuple[str, bool, tuple[int, int]]:
     """Configure camera preview stream and infer whether RGB->BGR conversion is needed.
 
@@ -129,13 +139,14 @@ def configure_camera(
     """
     requested_size = (width, height)
 
+    requested_format = pixel_format.strip().upper()
     rgb_config = picam2.create_preview_configuration(
-        main={"size": requested_size, "format": "RGB888"}
+        main={"size": requested_size, "format": requested_format}
     )
     picam2.configure(rgb_config)
 
     configured_main = picam2.camera_configuration().get("main", {})
-    effective_format = str(configured_main.get("format", "RGB888")).upper()
+    effective_format = str(configured_main.get("format", requested_format)).upper()
     effective_size = tuple(configured_main.get("size", requested_size))
 
     rgb_like_formats = {"RGB888", "RGBX8888", "RGBA8888", "XBGR8888"}
@@ -203,7 +214,7 @@ def main() -> None:
 
     picam2 = Picamera2()
     effective_format, needs_rgb_to_bgr, effective_size = configure_camera(
-        picam2, args.width, args.height
+        picam2, args.width, args.height, args.pixel_format
     )
 
     stream_config = picam2.camera_configuration().get("main", {})
@@ -232,10 +243,12 @@ def main() -> None:
     first_frame_logged = False
     first_frame_dumped = False
 
+    window_created = False
     if not args.headless:
         cv2.namedWindow("Camera arriere - Phase 1", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Camera arriere - Phase 1", 800, 450)
         cv2.moveWindow("Camera arriere - Phase 1", 50, 50)
+        window_created = True
 
     try:
         warmup_remaining = WARMUP_SKIP_FRAMES
@@ -311,7 +324,8 @@ def main() -> None:
         print("\n[shutdown] KeyboardInterrupt reçu, arrêt propre.")
     finally:
         picam2.stop()
-        cv2.destroyAllWindows()
+        if window_created:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
