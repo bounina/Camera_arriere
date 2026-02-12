@@ -22,6 +22,7 @@ from picamera2 import Picamera2
 
 WINDOW_NAME = "phase2-parking-overlay"
 SCREENSHOT_DIR = Path("data/screenshots")
+DEFAULT_LANE_WIDTH_BOTTOM = int(round(520 * 1.2))
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lane-width-bottom",
         type=int,
-        default=520,
+        default=DEFAULT_LANE_WIDTH_BOTTOM,
         help="Trajectory width in pixels near the bottom of the frame.",
     )
     parser.add_argument(
