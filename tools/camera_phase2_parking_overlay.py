@@ -69,10 +69,34 @@ def parse_args() -> argparse.Namespace:
         help="Steering increment/decrement in degrees for a/d keys.",
     )
     parser.add_argument(
-        "--overlay-style",
-        choices=["solid", "dashed"],
-        default="solid",
-        help="Line style for OEM overlay guides.",
+        "--zone-alpha",
+        type=float,
+        default=0.35,
+        help="Global alpha applied to the filled trajectory zone.",
+    )
+    parser.add_argument(
+        "--lane-width-bottom",
+        type=int,
+        default=520,
+        help="Trajectory width in pixels near the bottom of the frame.",
+    )
+    parser.add_argument(
+        "--lane-width-top",
+        type=int,
+        default=160,
+        help="Trajectory width in pixels near the top of the frame.",
+    )
+    parser.add_argument(
+        "--edge-thickness",
+        type=int,
+        default=5,
+        help="Thickness for trajectory edge lines.",
+    )
+    parser.add_argument(
+        "--style",
+        choices=["tesla", "simple"],
+        default="tesla",
+        help="Overlay rendering style.",
     )
     parser.add_argument(
         "--show-distance-markers",
@@ -159,50 +183,6 @@ def build_converter(raw: np.ndarray, forced: str | None) -> tuple[str, Callable[
     raise RuntimeError(f"Unsupported frame shape for conversion: {raw.shape}")
 
 
-def draw_dashed_polyline(
-    image: np.ndarray,
-    points: np.ndarray,
-    color: tuple[int, int, int],
-    thickness: int,
-    dash_length: int = 18,
-    gap_length: int = 12,
-) -> None:
-    for idx in range(len(points) - 1):
-        p0 = points[idx].astype(float)
-        p1 = points[idx + 1].astype(float)
-        seg = p1 - p0
-        seg_len = float(np.linalg.norm(seg))
-        if seg_len <= 1.0:
-            continue
-        direction = seg / seg_len
-        cursor = 0.0
-        while cursor < seg_len:
-            start = p0 + direction * cursor
-            end = p0 + direction * min(cursor + dash_length, seg_len)
-            cv2.line(
-                image,
-                tuple(np.round(start).astype(int)),
-                tuple(np.round(end).astype(int)),
-                color,
-                thickness,
-                cv2.LINE_AA,
-            )
-            cursor += dash_length + gap_length
-
-
-def draw_polyline(
-    image: np.ndarray,
-    points: np.ndarray,
-    style: str,
-    color: tuple[int, int, int],
-    thickness: int,
-) -> None:
-    if style == "dashed":
-        draw_dashed_polyline(image, points, color, thickness)
-    else:
-        cv2.polylines(image, [points.astype(np.int32)], False, color, thickness, cv2.LINE_AA)
-
-
 def distance_to_y(distance_m: float, height: int) -> int:
     horizon_y = int(height * 0.36)
     bottom_y = int(height * 0.95)
@@ -217,40 +197,72 @@ def draw_oem_overlay(
     image_bgr: np.ndarray,
     steering_deg: float,
     max_steering_deg: float,
-    overlay_style: str,
+    style: str,
+    zone_alpha: float,
+    lane_width_bottom_px: int,
+    lane_width_top_px: int,
+    edge_thickness: int,
     show_distance_markers: bool,
 ) -> np.ndarray:
-    out = image_bgr.copy()
-    h, w = out.shape[:2]
+    base = image_bgr
+    overlay = np.zeros_like(base)
+    h, w = base.shape[:2]
 
-    guide_color = (0, 235, 255)
-    marker_color = (255, 255, 255)
-    dynamic_color = (0, 200, 0)
+    zone_alpha = max(0.0, min(1.0, zone_alpha))
+    edge_thickness = max(1, edge_thickness)
+    lane_width_bottom_px = max(40, lane_width_bottom_px)
+    lane_width_top_px = max(20, lane_width_top_px)
+
+    zone_fill_color = (150, 115, 70) if style == "tesla" else (120, 120, 120)
+    edge_outer_color = (20, 100, 170) if style == "tesla" else (30, 30, 30)
+    edge_inner_color = (0, 190, 255) if style == "tesla" else (220, 220, 220)
+    marker_color = (225, 225, 225)
 
     bottom_y = int(h * 0.95)
-    top_y = int(h * 0.42)
+    curve_top_y = int(h * 0.40)
     center_x = w // 2
 
-    left_bottom_x = int(w * 0.32)
-    right_bottom_x = int(w * 0.68)
-    left_top_x = int(w * 0.44)
-    right_top_x = int(w * 0.56)
+    max_abs = max(1e-6, max_steering_deg)
+    turn_ratio = max(-1.0, min(1.0, steering_deg / max_abs))
+    y_values = np.linspace(bottom_y, curve_top_y, 80)
 
-    left_points = np.array([[left_bottom_x, bottom_y], [left_top_x, top_y]], dtype=np.int32)
-    right_points = np.array([[right_bottom_x, bottom_y], [right_top_x, top_y]], dtype=np.int32)
+    left_points: list[list[int]] = []
+    right_points: list[list[int]] = []
+    max_shift_px = int(w * 0.22)
+    for y in y_values:
+        progress = (bottom_y - y) / max(1.0, bottom_y - curve_top_y)
+        shift = turn_ratio * max_shift_px * (progress**2)
+        x_center = int(center_x + shift)
+        width_px = int(lane_width_bottom_px + (lane_width_top_px - lane_width_bottom_px) * progress)
+        half_w = width_px // 2
+        y_int = int(y)
+        left_points.append([x_center - half_w, y_int])
+        right_points.append([x_center + half_w, y_int])
 
-    draw_polyline(out, left_points, overlay_style, guide_color, 3)
-    draw_polyline(out, right_points, overlay_style, guide_color, 3)
+    left_arr = np.array(left_points, dtype=np.int32)
+    right_arr = np.array(right_points, dtype=np.int32)
+
+    polygon = np.vstack([left_arr, right_arr[::-1]])
+    cv2.fillPoly(overlay, [polygon], zone_fill_color, lineType=cv2.LINE_AA)
 
     if show_distance_markers:
         for dist_m in (0.5, 1.0, 2.0, 3.0):
             y = distance_to_y(dist_m, h)
-            line_points = np.array([[left_bottom_x, y], [right_bottom_x, y]], dtype=np.int32)
-            draw_polyline(out, line_points, overlay_style, marker_color, 2)
+            idx = int(np.clip(np.argmin(np.abs(y_values - y)), 0, len(y_values) - 1))
+            marker_p0 = tuple(left_arr[idx])
+            marker_p1 = tuple(right_arr[idx])
+            cv2.line(overlay, marker_p0, marker_p1, marker_color, 2, cv2.LINE_AA)
+
+            text = f"{dist_m:.1f}m"
+            text_pos = (marker_p1[0] + 10, marker_p1[1] + 5)
+            (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            rect_tl = (text_pos[0] - 4, text_pos[1] - th - 4)
+            rect_br = (text_pos[0] + tw + 4, text_pos[1] + baseline + 2)
+            cv2.rectangle(overlay, rect_tl, rect_br, (40, 40, 40), -1)
             cv2.putText(
-                out,
-                f"{dist_m:.1f}m",
-                (right_bottom_x + 10, y + 5),
+                overlay,
+                text,
+                text_pos,
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
                 marker_color,
@@ -258,22 +270,13 @@ def draw_oem_overlay(
                 cv2.LINE_AA,
             )
 
-    max_abs = max(1e-6, max_steering_deg)
-    turn_ratio = max(-1.0, min(1.0, steering_deg / max_abs))
+    glow_thickness = edge_thickness + 4
+    cv2.polylines(overlay, [left_arr], False, edge_outer_color, glow_thickness, cv2.LINE_AA)
+    cv2.polylines(overlay, [right_arr], False, edge_outer_color, glow_thickness, cv2.LINE_AA)
+    cv2.polylines(overlay, [left_arr], False, edge_inner_color, edge_thickness, cv2.LINE_AA)
+    cv2.polylines(overlay, [right_arr], False, edge_inner_color, edge_thickness, cv2.LINE_AA)
 
-    curve_top_y = int(h * 0.40)
-    y_values = np.linspace(bottom_y, curve_top_y, 80)
-    points = []
-    max_shift_px = int(w * 0.22)
-    for y in y_values:
-        progress = (bottom_y - y) / max(1.0, bottom_y - curve_top_y)
-        shift = turn_ratio * max_shift_px * (progress**2)
-        x = int(center_x + shift)
-        points.append([x, int(y)])
-    dynamic_points = np.array(points, dtype=np.int32)
-    draw_polyline(out, dynamic_points, overlay_style, dynamic_color, 3)
-
-    return out
+    return cv2.addWeighted(overlay, zone_alpha, base, 1.0 - zone_alpha, 0.0)
 
 
 def draw_hud(
@@ -283,6 +286,7 @@ def draw_hud(
     conversion: str,
     steering_deg: float,
     overlay_enabled: bool,
+    style: str,
 ) -> np.ndarray:
     out = image_bgr.copy()
     lines = [
@@ -290,6 +294,7 @@ def draw_hud(
         f"raw: {raw_shape}",
         f"conv: {conversion}",
         f"steering: {steering_deg:+.1f} deg (a/d/r)",
+        f"style: {style}",
         f"overlay: {'on' if overlay_enabled else 'off'} (o)",
         "keys: a d r o s q",
     ]
@@ -377,10 +382,14 @@ def main() -> int:
                     view,
                     steering_deg,
                     args.max_steering_deg,
-                    args.overlay_style,
+                    args.style,
+                    args.zone_alpha,
+                    args.lane_width_bottom,
+                    args.lane_width_top,
+                    args.edge_thickness,
                     args.show_distance_markers,
                 )
-            hud_frame = draw_hud(view, fps, tuple(raw.shape), conversion_name, steering_deg, overlay_enabled)
+            hud_frame = draw_hud(view, fps, tuple(raw.shape), conversion_name, steering_deg, overlay_enabled, args.style)
 
             if headless:
                 save_bgr_frame("phase2_headless", hud_frame)
