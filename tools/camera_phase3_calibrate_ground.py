@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Phase 3: ground-projected parking overlay with keyboard homography calibration."""
 
+# Exemples:
+# python3 tools/camera_phase3_calibrate_ground.py --preset small_fov
+# python3 tools/camera_phase3_calibrate_ground.py --units cm --width-m 20 --near-y 20 --far-y 80 --lane-width-m 20 --max-distance-m 80 --marker-step-m 20
+
 from __future__ import annotations
 
 import argparse
@@ -20,6 +24,17 @@ WINDOW_NAME = "phase3-ground-calibration"
 CALIB_PATH = Path("configs/parking_calib.json")
 STEP_CHOICES = [1, 5, 20]
 POINT_NAMES = ["Near-L", "Near-R", "Far-R", "Far-L"]
+SMALL_FOV_PRESET = {
+    "units": "cm",
+    "width_m": 0.20,
+    "lane_width_m": 0.20,
+    "near_y": 0.20,
+    "far_y": 0.80,
+    "max_distance_m": 0.80,
+    "marker_step_m": 0.20,
+    "marker_mode": "step",
+    "distance_markers_m": None,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distance-markers", type=str, default=None, help='Explicit marker list, e.g. "0.2,0.4,0.6"')
     parser.add_argument("--marker-step-m", type=float, default=None, help="Auto marker step from near_y to max_distance_m")
     parser.add_argument("--units", choices=["m", "cm"], default=None, help="UI/display units")
+    parser.add_argument("--preset", choices=["small_fov"], default=None, help="Apply predefined calibration values")
     return parser.parse_args()
 
 
@@ -99,6 +115,43 @@ def value_to_units(value_m: float, units: str) -> float:
 
 def units_suffix(units: str) -> str:
     return "cm" if units == "cm" else "m"
+
+
+def cli_to_meters(value: float | None, units: str) -> float | None:
+    if value is None:
+        return None
+    return float(value) * (0.01 if units == "cm" else 1.0)
+
+
+def format_distance(value_m: float, units: str) -> str:
+    value = value_to_units(value_m, units)
+    if units == "cm":
+        return f"{value:.0f} cm"
+    return f"{value:.2f} m"
+
+
+def apply_small_fov_preset(
+    width_m: float,
+    near_y: float,
+    far_y: float,
+    lane_width_m: float,
+    max_distance_m: float,
+    marker_step_m: float | None,
+    marker_mode: str,
+    distance_markers_m: list[float] | None,
+    units: str,
+) -> tuple[float, float, float, float, float, float | None, str, list[float] | None, str]:
+    return (
+        SMALL_FOV_PRESET["width_m"],
+        SMALL_FOV_PRESET["near_y"],
+        SMALL_FOV_PRESET["far_y"],
+        SMALL_FOV_PRESET["lane_width_m"],
+        SMALL_FOV_PRESET["max_distance_m"],
+        SMALL_FOV_PRESET["marker_step_m"],
+        SMALL_FOV_PRESET["marker_mode"],
+        SMALL_FOV_PRESET["distance_markers_m"],
+        SMALL_FOV_PRESET["units"],
+    )
 
 
 def draw_label_with_bg(frame: np.ndarray, text: str, org: tuple[int, int], scale: float = 0.5) -> None:
@@ -256,8 +309,7 @@ def draw_ground_overlay(
         seg_img = project_world(H, seg_world).astype(np.int32)
         p0, p1 = tuple(seg_img[0]), tuple(seg_img[1])
         cv2.line(out, p0, p1, (210, 210, 210), 2, cv2.LINE_AA)
-        label_val = value_to_units(dist, units)
-        draw_label_with_bg(out, f"{label_val:.2f} {units_suffix(units)}", (p1[0] + 8, p1[1] + 4))
+        draw_label_with_bg(out, format_distance(dist, units), (p1[0] + 8, p1[1] + 4))
 
     return out
 
@@ -295,26 +347,29 @@ def draw_hud(
     marker_mode: str,
     marker_step_m: float | None,
     distance_markers_m: list[float] | None,
+    units: str,
 ) -> np.ndarray:
     out = frame.copy()
     lines = [
         f"FPS: {fps:.1f}",
         f"selected: {selected_idx + 1} {POINT_NAMES[selected_idx]}",
         f"step_px: {step_px} (+/-)",
-        f"width_m={width_m:.2f} near_y={near_y:.2f} far_y={far_y:.2f}",
-        f"lane_width_m={lane_width_m:.2f} max_distance_m={max_distance_m:.2f}",
+        f"width={format_distance(width_m, units)} lane_width={format_distance(lane_width_m, units)}",
+        f"near_y (distance caméra)={format_distance(near_y, units)} far_y (distance caméra)={format_distance(far_y, units)}",
+        f"max_distance={format_distance(max_distance_m, units)} plage couverte=[{format_distance(near_y, units)} .. {format_distance(max_distance_m, units)}]",
         f"zone_alpha={zone_alpha:.2f} edit_params={'ON' if param_edit_mode else 'OFF'} (t)",
         (
             "markers: "
             + (
-                f"step={marker_step_m:.2f}m (mode=step)"
+                f"step={format_distance(marker_step_m or 0.0, units)} (mode=step)"
                 if marker_mode == "step"
-                else f"list={','.join(f'{v:.2f}' for v in (distance_markers_m or []))} (mode=list)"
+                else f"list={','.join(format_distance(v, units) for v in (distance_markers_m or []))} (mode=list)"
             )
         ),
+        f"units={units}",
         f"rot={rotate} flip={flip}",
         f"calibration: {'ON' if calibration_mode else 'OFF'} (c)",
-        "keys: c/t 1..4 i/j/k/l +/- [ ] p o q",
+        "keys: c/t 1..4 i/j/k/l +/- [ ] p o x q",
         "edit: w/s width e/d lane r/f near y/h far u/j max a/z alpha m mode n step",
     ]
     y = 28
@@ -357,7 +412,13 @@ def save_calibration(
         "units": units,
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    print(f"[INFO] Saved calibration: {path} -> {json.dumps(payload, ensure_ascii=False)}")
+    print(
+        "[SAVED] "
+        f"{path} | width_m={width_m:.3f}, near_y={near_y:.3f}, far_y={far_y:.3f}, "
+        f"lane_width_m={lane_width_m:.3f}, max_distance_m={max_distance_m:.3f}, "
+        f"zone_alpha={zone_alpha:.2f}, marker_mode={marker_mode}, marker_step_m={marker_step_m}, "
+        f"distance_markers_m={distance_markers_m}, rotate={rotate}, flip={flip}, units={units}"
+    )
 
 
 def load_calibration(path: Path) -> dict | None:
@@ -365,8 +426,63 @@ def load_calibration(path: Path) -> dict | None:
         print(f"[WARN] Calibration file not found: {path}")
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    print(f"[INFO] Calibration loaded: {path}")
+    print(f"[INFO] Calibration loaded from: {path}")
     return data
+
+
+def apply_loaded_calibration(
+    loaded: dict,
+    image_points: np.ndarray,
+    width_m: float,
+    near_y: float,
+    far_y: float,
+    lane_width_m: float,
+    max_distance_m: float,
+    zone_alpha: float,
+    distance_markers_m: list[float] | None,
+    marker_step_m: float | None,
+    marker_mode: str,
+    rotate: int,
+    flip: str,
+    units: str,
+) -> tuple[np.ndarray, float, float, float, float, float, float, list[float] | None, float | None, str, int, str, str]:
+    image_points = np.array(loaded["image_points"], dtype=np.float32)
+    width_m = float(loaded.get("width_m", width_m))
+    near_y = float(loaded.get("near_y", near_y))
+    far_y = float(loaded.get("far_y", far_y))
+    lane_width_m = float(loaded.get("lane_width_m", lane_width_m))
+    max_distance_m = float(loaded.get("max_distance_m", max_distance_m))
+    zone_alpha = float(loaded.get("zone_alpha", zone_alpha))
+    loaded_markers = loaded.get("distance_markers_m")
+    if isinstance(loaded_markers, list):
+        distance_markers_m = [float(v) for v in loaded_markers]
+    marker_step_raw = loaded.get("marker_step_m", marker_step_m)
+    marker_step_m = float(marker_step_raw) if marker_step_raw is not None else None
+    marker_mode = str(loaded.get("marker_mode", marker_mode))
+    rotate = int(loaded.get("rotate", rotate))
+    flip = str(loaded.get("flip", flip))
+    units = str(loaded.get("units", units))
+    print(
+        "[LOADED] "
+        f"width_m={width_m:.3f}, near_y={near_y:.3f}, far_y={far_y:.3f}, lane_width_m={lane_width_m:.3f}, "
+        f"max_distance_m={max_distance_m:.3f}, zone_alpha={zone_alpha:.2f}, marker_mode={marker_mode}, "
+        f"marker_step_m={marker_step_m}, distance_markers_m={distance_markers_m}, rotate={rotate}, flip={flip}, units={units}"
+    )
+    return (
+        image_points,
+        width_m,
+        near_y,
+        far_y,
+        lane_width_m,
+        max_distance_m,
+        zone_alpha,
+        distance_markers_m,
+        marker_step_m,
+        marker_mode,
+        rotate,
+        flip,
+        units,
+    )
 
 
 def main() -> int:
@@ -394,16 +510,16 @@ def main() -> int:
 
     rotate = args.rotate if args.rotate is not None else 180
     flip = args.flip if args.flip is not None else "none"
-    width_m = float(args.width_m) if args.width_m is not None else 2.6
-    near_y = float(args.near_y) if args.near_y is not None else 0.5
-    far_y = float(args.far_y) if args.far_y is not None else 3.0
-    lane_width_m = float(args.lane_width_m) if args.lane_width_m is not None else 2.6
-    max_distance_m = float(args.max_distance_m) if args.max_distance_m is not None else 3.0
+    width_m = 2.6
+    near_y = 0.5
+    far_y = 3.0
+    lane_width_m = 2.6
+    max_distance_m = 3.0
     zone_alpha = float(args.zone_alpha) if args.zone_alpha is not None else 0.35
-    distance_markers_m = parse_distance_markers(args.distance_markers)
-    marker_step_m = float(args.marker_step_m) if args.marker_step_m is not None else 0.5
-    marker_mode = "list" if distance_markers_m else "step"
-    units = args.units if args.units is not None else "m"
+    distance_markers_m: list[float] | None = None
+    marker_step_m: float | None = 0.5
+    marker_mode = "step"
+    units = "m"
     cli_units = args.units if args.units is not None else "m"
 
     try:
@@ -422,53 +538,94 @@ def main() -> int:
         loaded = load_calibration(CALIB_PATH)
         if loaded is not None:
             try:
-                image_points = np.array(loaded["image_points"], dtype=np.float32)
-                width_m = float(loaded.get("width_m", width_m))
-                near_y = float(loaded.get("near_y", near_y))
-                far_y = float(loaded.get("far_y", far_y))
-                lane_width_m = float(loaded.get("lane_width_m", lane_width_m))
-                max_distance_m = float(loaded.get("max_distance_m", max_distance_m))
-                zone_alpha = float(loaded.get("zone_alpha", zone_alpha))
-                loaded_markers = loaded.get("distance_markers_m")
-                if isinstance(loaded_markers, list):
-                    distance_markers_m = [float(v) for v in loaded_markers]
-                marker_step_m = float(loaded.get("marker_step_m", marker_step_m))
-                marker_mode = loaded.get("marker_mode", marker_mode)
-                rotate = int(loaded.get("rotate", rotate))
-                flip = str(loaded.get("flip", flip))
-                units = str(loaded.get("units", units))
-                print(
-                    "[INFO] Applied calibration file values: "
-                    f"width_m={width_m}, near_y={near_y}, far_y={far_y}, lane_width_m={lane_width_m}, "
-                    f"max_distance_m={max_distance_m}, zone_alpha={zone_alpha}, marker_mode={marker_mode}, "
-                    f"marker_step_m={marker_step_m}, distance_markers_m={distance_markers_m}, rotate={rotate}, flip={flip}, units={units}"
+                (
+                    image_points,
+                    width_m,
+                    near_y,
+                    far_y,
+                    lane_width_m,
+                    max_distance_m,
+                    zone_alpha,
+                    distance_markers_m,
+                    marker_step_m,
+                    marker_mode,
+                    rotate,
+                    flip,
+                    units,
+                ) = apply_loaded_calibration(
+                    loaded,
+                    image_points,
+                    width_m,
+                    near_y,
+                    far_y,
+                    lane_width_m,
+                    max_distance_m,
+                    zone_alpha,
+                    distance_markers_m,
+                    marker_step_m,
+                    marker_mode,
+                    rotate,
+                    flip,
+                    units,
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 print(f"[WARN] Invalid calibration file data: {exc}")
+
+        if args.preset == "small_fov":
+            (
+                width_m,
+                near_y,
+                far_y,
+                lane_width_m,
+                max_distance_m,
+                marker_step_m,
+                marker_mode,
+                distance_markers_m,
+                units,
+            ) = apply_small_fov_preset(
+                width_m,
+                near_y,
+                far_y,
+                lane_width_m,
+                max_distance_m,
+                marker_step_m,
+                marker_mode,
+                distance_markers_m,
+                units,
+            )
 
         if args.rotate is not None:
             rotate = args.rotate
         if args.flip is not None:
             flip = args.flip
-        scalar_factor = 0.01 if cli_units == "cm" else 1.0
         if args.width_m is not None:
-            width_m = float(args.width_m) * scalar_factor
+            converted = cli_to_meters(args.width_m, cli_units)
+            if converted is not None:
+                width_m = converted
         if args.near_y is not None:
-            near_y = float(args.near_y) * scalar_factor
+            converted = cli_to_meters(args.near_y, cli_units)
+            if converted is not None:
+                near_y = converted
         if args.far_y is not None:
-            far_y = float(args.far_y) * scalar_factor
+            converted = cli_to_meters(args.far_y, cli_units)
+            if converted is not None:
+                far_y = converted
         if args.lane_width_m is not None:
-            lane_width_m = float(args.lane_width_m) * scalar_factor
+            converted = cli_to_meters(args.lane_width_m, cli_units)
+            if converted is not None:
+                lane_width_m = converted
         if args.max_distance_m is not None:
-            max_distance_m = float(args.max_distance_m) * scalar_factor
+            converted = cli_to_meters(args.max_distance_m, cli_units)
+            if converted is not None:
+                max_distance_m = converted
         if args.zone_alpha is not None:
             zone_alpha = float(args.zone_alpha)
         if args.distance_markers is not None:
             parsed = parse_distance_markers(args.distance_markers)
-            distance_markers_m = [v * scalar_factor for v in (parsed or [])]
+            distance_markers_m = [cli_to_meters(v, cli_units) or 0.0 for v in (parsed or [])]
             marker_mode = "list"
         if args.marker_step_m is not None:
-            marker_step_m = float(args.marker_step_m) * scalar_factor
+            marker_step_m = cli_to_meters(args.marker_step_m, cli_units)
             if args.distance_markers is None:
                 marker_mode = "step"
         if args.units is not None:
@@ -535,6 +692,7 @@ def main() -> int:
                 marker_mode,
                 marker_step_m,
                 distance_markers_m,
+                units,
             )
 
             if headless:
@@ -583,29 +741,61 @@ def main() -> int:
                 loaded = load_calibration(CALIB_PATH)
                 if loaded is not None:
                     try:
-                        image_points = np.array(loaded["image_points"], dtype=np.float32)
-                        width_m = float(loaded.get("width_m", width_m))
-                        near_y = float(loaded.get("near_y", near_y))
-                        far_y = float(loaded.get("far_y", far_y))
-                        lane_width_m = float(loaded.get("lane_width_m", lane_width_m))
-                        max_distance_m = float(loaded.get("max_distance_m", max_distance_m))
-                        zone_alpha = float(loaded.get("zone_alpha", zone_alpha))
-                        loaded_markers = loaded.get("distance_markers_m")
-                        if isinstance(loaded_markers, list):
-                            distance_markers_m = [float(v) for v in loaded_markers]
-                        marker_step_m = float(loaded.get("marker_step_m", marker_step_m))
-                        marker_mode = str(loaded.get("marker_mode", marker_mode))
-                        rotate = int(loaded.get("rotate", rotate))
-                        flip = str(loaded.get("flip", flip))
-                        units = str(loaded.get("units", units))
-                        print(
-                            "[INFO] Applied calibration file values: "
-                            f"width_m={width_m}, near_y={near_y}, far_y={far_y}, lane_width_m={lane_width_m}, "
-                            f"max_distance_m={max_distance_m}, zone_alpha={zone_alpha}, marker_mode={marker_mode}, "
-                            f"marker_step_m={marker_step_m}, distance_markers_m={distance_markers_m}, rotate={rotate}, flip={flip}, units={units}"
+                        (
+                            image_points,
+                            width_m,
+                            near_y,
+                            far_y,
+                            lane_width_m,
+                            max_distance_m,
+                            zone_alpha,
+                            distance_markers_m,
+                            marker_step_m,
+                            marker_mode,
+                            rotate,
+                            flip,
+                            units,
+                        ) = apply_loaded_calibration(
+                            loaded,
+                            image_points,
+                            width_m,
+                            near_y,
+                            far_y,
+                            lane_width_m,
+                            max_distance_m,
+                            zone_alpha,
+                            distance_markers_m,
+                            marker_step_m,
+                            marker_mode,
+                            rotate,
+                            flip,
+                            units,
                         )
                     except (KeyError, TypeError, ValueError) as exc:
                         print(f"[WARN] Could not apply calibration: {exc}")
+            if key == ord("x"):
+                (
+                    width_m,
+                    near_y,
+                    far_y,
+                    lane_width_m,
+                    max_distance_m,
+                    marker_step_m,
+                    marker_mode,
+                    distance_markers_m,
+                    units,
+                ) = apply_small_fov_preset(
+                    width_m,
+                    near_y,
+                    far_y,
+                    lane_width_m,
+                    max_distance_m,
+                    marker_step_m,
+                    marker_mode,
+                    distance_markers_m,
+                    units,
+                )
+                print("[INFO] Reset preset: small_fov")
 
             if param_edit_mode:
                 if key == ord("w"):
