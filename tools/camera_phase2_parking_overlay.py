@@ -34,6 +34,19 @@ def parse_args() -> argparse.Namespace:
         help="Force a conversion strategy instead of automatic selection.",
     )
     parser.add_argument(
+        "--rotate",
+        type=int,
+        choices=[0, 90, 180, 270],
+        default=180,
+        help="Apply image rotation in degrees after BGR conversion.",
+    )
+    parser.add_argument(
+        "--flip",
+        choices=["none", "h", "v", "hv"],
+        default="none",
+        help="Apply image flip after rotation (h=horizontal, v=vertical).",
+    )
+    parser.add_argument(
         "--dump-first-frame",
         action="store_true",
         help="Dump first raw frame (npy) and converted bgr.png to data/screenshots/.",
@@ -184,6 +197,25 @@ def build_converter(raw: np.ndarray, forced: str | None) -> tuple[str, Callable[
     raise RuntimeError(f"Unsupported frame shape for conversion: {raw.shape}")
 
 
+def apply_orientation(frame_bgr: np.ndarray, rotate: int, flip: str) -> np.ndarray:
+    oriented = frame_bgr
+    if rotate == 90:
+        oriented = cv2.rotate(oriented, cv2.ROTATE_90_CLOCKWISE)
+    elif rotate == 180:
+        oriented = cv2.rotate(oriented, cv2.ROTATE_180)
+    elif rotate == 270:
+        oriented = cv2.rotate(oriented, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    if flip == "h":
+        oriented = cv2.flip(oriented, 1)
+    elif flip == "v":
+        oriented = cv2.flip(oriented, 0)
+    elif flip == "hv":
+        oriented = cv2.flip(oriented, -1)
+
+    return oriented
+
+
 def distance_to_y(distance_m: float, height: int) -> int:
     horizon_y = int(height * 0.36)
     bottom_y = int(height * 0.95)
@@ -288,6 +320,8 @@ def draw_hud(
     steering_deg: float,
     overlay_enabled: bool,
     style: str,
+    rotate: int,
+    flip: str,
 ) -> np.ndarray:
     out = image_bgr.copy()
     lines = [
@@ -296,6 +330,7 @@ def draw_hud(
         f"conv: {conversion}",
         f"steering: {steering_deg:+.1f} deg (a/d/r)",
         f"style: {style}",
+        f"rot={rotate} flip={flip}",
         f"overlay: {'on' if overlay_enabled else 'off'} (o)",
         "keys: a d r o s q",
     ]
@@ -348,7 +383,7 @@ def main() -> int:
         conversion_name, converter = build_converter(raw_first, args.force_conversion)
         print(f"[INFO] Conversion selected: {conversion_name}")
 
-        bgr_first = converter(raw_first)
+        bgr_first = apply_orientation(converter(raw_first), args.rotate, args.flip)
 
         if args.dump_first_frame:
             out_dir = ensure_output_dir()
@@ -369,6 +404,8 @@ def main() -> int:
         while not stop_requested:
             raw = raw_first if frame_index == 0 else picam2.capture_array()
             bgr = bgr_first if frame_index == 0 else converter(raw)
+            if frame_index != 0:
+                bgr = apply_orientation(bgr, args.rotate, args.flip)
 
             now_t = time.perf_counter()
             dt = now_t - prev_t
@@ -390,7 +427,17 @@ def main() -> int:
                     args.edge_thickness,
                     args.show_distance_markers,
                 )
-            hud_frame = draw_hud(view, fps, tuple(raw.shape), conversion_name, steering_deg, overlay_enabled, args.style)
+            hud_frame = draw_hud(
+                view,
+                fps,
+                tuple(raw.shape),
+                conversion_name,
+                steering_deg,
+                overlay_enabled,
+                args.style,
+                args.rotate,
+                args.flip,
+            )
 
             if headless:
                 save_bgr_frame("phase2_headless", hud_frame)
