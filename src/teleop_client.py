@@ -33,11 +33,11 @@ import numpy as np
 WINDOW_NAME = "Teleop - Voiture Autonome"
 
 # ======== PARAMÈTRES DE CONDUITE RC ========
-MAX_FWD_SPEED  = 0.20     # vitesse max avant
+MAX_FWD_SPEED  = 0.25     # vitesse max avant
 MAX_BWD_SPEED  = -0.15    # vitesse max arrière
-ACCEL_STEP     = 0.008    # accélération par frame (~0.24/s à 30fps)
-DECEL_FACTOR   = 0.92     # décélération auto quand aucune touche (multiplicateur)
-DEAD_ZONE      = 0.02     # en-dessous de ça, on met à 0
+ACCEL_STEP     = 0.018    # accélération par frame (plus réactif)
+DECEL_FACTOR   = 0.92     # décélération auto quand aucune touche
+DEAD_ZONE      = 0.02     # en-dessous, on met à 0
 
 ANGLE_STEP     = 0.1      # incrément direction par appui Q/D
 MAX_ANGLE      = 1.0
@@ -172,10 +172,14 @@ def main() -> int:
     fps = 0.0
     prev_t = time.perf_counter()
     last_cmd_time = 0.0
-    CMD_INTERVAL = 0.05  # envoie commandes max 20x/s pour ne pas saturer
+    CMD_INTERVAL = 0.05  # envoie commandes max 20x/s
+
+    # Test servo : angles de test pour la touche T
+    TEST_ANGLES = [-1.0, -0.5, 0.0, 0.5, 1.0]
+    test_index = -1  # -1 = pas en mode test
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    print("[TELEOP] Ready. Z/S=throttle, Q/D=steer, SPACE=stop, T=test servo, ESC=quit.")
+    print("[TELEOP] Ready. Z/S=throttle, Q/D=steer, SPACE=stop, T=test servo, R=center, ESC=quit.")
 
     try:
         while True:
@@ -238,10 +242,19 @@ def main() -> int:
                 send_command(cmd_sock, "TELEOP:STOP")
 
             elif key == ord("t"):
-                # Test servo sweep
-                print("[TEST] Sending servo test command...")
-                send_command(cmd_sock, "TELEOP:TEST_SERVO")
+                # Test servo : cycle through test angles (non-bloquant)
+                test_index = (test_index + 1) % len(TEST_ANGLES)
+                test_angle = TEST_ANGLES[test_index]
+                angle = test_angle
+                speed = 0.0
+                print(f"[TEST SERVO] angle = {test_angle:+.1f}  (appuie T pour suivant, R pour centre)")
                 throttle_state = "TEST"
+
+            elif key == ord("r"):
+                # Recentrer la direction sans stopper
+                angle = 0.0
+                test_index = -1
+                print("[TELEOP] Direction recentr\u00e9e")
 
             # --- Décélération automatique ---
             if not throttle_active and key != ord(" ") and key != ord("t"):
