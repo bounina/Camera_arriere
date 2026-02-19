@@ -60,7 +60,8 @@ def apply_orientation(frame: np.ndarray, rotate: int, flip: str) -> np.ndarray:
 
 def try_configure(picam2: Picamera2, width: int, height: int) -> None:
     """Try multiple pixel formats until one works."""
-    for fmt in ["XRGB8888", "RGBX", "RGB888"]:
+    # RGB888 first — gives true RGB, easy to convert to BGR for OpenCV
+    for fmt in ["RGB888", "XRGB8888", "RGBX"]:
         try:
             cfg = picam2.create_preview_configuration(
                 main={"format": fmt, "size": (width, height)}
@@ -79,9 +80,10 @@ def convert_to_bgr(frame: np.ndarray) -> np.ndarray:
         return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     channels = frame.shape[2]
     if channels == 4:
-        return cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        # XRGB8888 from Picamera2 is actually BGRA in memory
+        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
     if channels == 3:
-        # Picamera2 typically outputs RGB, convert to BGR for cv2
+        # RGB888 from Picamera2 → convert to BGR for cv2
         return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     return frame
 
