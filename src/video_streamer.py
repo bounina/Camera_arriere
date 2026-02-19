@@ -29,8 +29,8 @@ from picamera2 import Picamera2
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="JPEG-over-TCP video streamer for Raspberry Pi.")
     parser.add_argument("--port", type=int, default=8885, help="TCP port to listen on (default: 8885)")
-    parser.add_argument("--width", type=int, default=640, help="Capture width (default: 640)")
-    parser.add_argument("--height", type=int, default=480, help="Capture height (default: 480)")
+    parser.add_argument("--width", type=int, default=640, help="Output width (default: 640)")
+    parser.add_argument("--height", type=int, default=480, help="Output height (default: 480)")
     parser.add_argument("--quality", type=int, default=70, help="JPEG quality 1-100 (default: 70)")
     parser.add_argument("--rotate", type=int, choices=[0, 90, 180, 270], default=180,
                         help="Rotation in degrees (default: 180)")
@@ -39,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps-cap", type=int, default=30, help="Max FPS (default: 30)")
     parser.add_argument("--swap-rb", action="store_true", default=False,
                         help="Force swap Red/Blue channels (use if colors are wrong)")
+    parser.add_argument("--fov", choices=["normal", "wide"], default="wide",
+                        help="FOV mode: 'wide' uses full sensor for max angle (default: wide)")
     return parser.parse_args()
 
 
@@ -60,16 +62,26 @@ def apply_orientation(frame: np.ndarray, rotate: int, flip: str) -> np.ndarray:
     return frame
 
 
-def try_configure(picam2: Picamera2, width: int, height: int) -> None:
-    """Try multiple pixel formats until one works."""
+def try_configure(picam2: Picamera2, width: int, height: int, fov_mode: str) -> None:
+    """Configure the camera. In 'wide' mode, use full sensor for widest FOV."""
+    sensor_res = picam2.sensor_resolution
+    print(f"[STREAMER] Sensor native resolution: {sensor_res[0]}x{sensor_res[1]}")
+
     # RGB888 first — gives true RGB, easy to convert to BGR for OpenCV
     for fmt in ["RGB888", "XRGB8888", "RGBX"]:
         try:
-            cfg = picam2.create_preview_configuration(
-                main={"format": fmt, "size": (width, height)}
-            )
+            if fov_mode == "wide":
+                # Use full sensor → widest FOV, downscaled to output size
+                cfg = picam2.create_preview_configuration(
+                    main={"format": fmt, "size": (width, height)},
+                    raw={"size": sensor_res},
+                )
+            else:
+                cfg = picam2.create_preview_configuration(
+                    main={"format": fmt, "size": (width, height)}
+                )
             picam2.configure(cfg)
-            print(f"[STREAMER] Configured: {fmt} @ {width}x{height}")
+            print(f"[STREAMER] Configured: {fmt} @ {width}x{height} (FOV: {fov_mode})")
             return
         except Exception as exc:
             print(f"[STREAMER] Format {fmt} unavailable: {exc}")
@@ -108,8 +120,15 @@ def main() -> int:
 
     # --- Camera init ---
     picam2 = Picamera2()
-    try_configure(picam2, args.width, args.height)
+    try_configure(picam2, args.width, args.height, args.fov)
     picam2.start()
+
+    # In wide mode, ensure full sensor is used (no digital crop)
+    if args.fov == "wide":
+        sensor_res = picam2.sensor_resolution
+        picam2.set_controls({"ScalerCrop": (0, 0, sensor_res[0], sensor_res[1])})
+        print(f"[STREAMER] ScalerCrop set to full sensor: {sensor_res}")
+
     time.sleep(1.0)  # warmup
     # Flush initial frames
     for _ in range(5):
