@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flip", choices=["none", "h", "v", "hv"], default="none",
                         help="Flip mode (default: none)")
     parser.add_argument("--fps-cap", type=int, default=30, help="Max FPS (default: 30)")
+    parser.add_argument("--swap-rb", action="store_true", default=False,
+                        help="Force swap Red/Blue channels (use if colors are wrong)")
     return parser.parse_args()
 
 
@@ -74,18 +76,23 @@ def try_configure(picam2: Picamera2, width: int, height: int) -> None:
     raise RuntimeError("No compatible camera format found")
 
 
-def convert_to_bgr(frame: np.ndarray) -> np.ndarray:
+def convert_to_bgr(frame: np.ndarray, swap_rb: bool = False) -> np.ndarray:
     """Auto-convert captured frame to BGR for JPEG encoding."""
     if frame.ndim == 2:
         return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     channels = frame.shape[2]
     if channels == 4:
         # XRGB8888 from Picamera2 is actually BGRA in memory
-        return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-    if channels == 3:
-        # RGB888 from Picamera2 → convert to BGR for cv2
-        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    return frame
+        result = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    elif channels == 3:
+        # Direct copy — Picamera2 RGB888 may already be BGR in memory
+        result = frame.copy()
+    else:
+        result = frame
+    # If --swap-rb is set, force a channel swap
+    if swap_rb:
+        result = cv2.cvtColor(result, cv2.COLOR_BGR2RGB)
+    return result
 
 
 def main() -> int:
@@ -144,8 +151,16 @@ def main() -> int:
                     t0 = time.perf_counter()
 
                     raw = picam2.capture_array()
-                    bgr = convert_to_bgr(raw)
+                    bgr = convert_to_bgr(raw, swap_rb=args.swap_rb)
                     bgr = apply_orientation(bgr, args.rotate, args.flip)
+
+                    # Print diagnostic info for the very first frame
+                    if frame_count == 0:
+                        print(f"[DIAG] Raw frame: shape={raw.shape}, dtype={raw.dtype}")
+                        print(f"[DIAG] Pixel [100,100] raw = {raw[100,100]}")
+                        print(f"[DIAG] Pixel [100,100] bgr = {bgr[100,100]}")
+                        print(f"[DIAG] swap_rb = {args.swap_rb}")
+                        print(f"[DIAG] Si couleurs inversées, relance avec: --swap-rb")
 
                     ok, jpeg = cv2.imencode(".jpg", bgr, encode_params)
                     if not ok:
